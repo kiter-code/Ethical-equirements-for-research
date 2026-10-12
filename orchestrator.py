@@ -16,15 +16,11 @@ orchestrator.py — ядро системы: конечный автомат, п
   - контекст при переходе не теряется: вторая роль видит найденное первой
   - вызов инструмента идёт через MCP-клиент, а не прямым импортом функции поиска
 
-НЕ МЕНЯТЬ: сигнатуру handle(session_id, text) -> str. Это единственная точка
-входа в систему, и её вызывают оба канала (app.py, vk_bot.py) и test_suite.py.
-
-Порядок сдачи. На П3 сквозного ответа ещё не будет: build_messages() и клиент LLM
-пишутся на П4. Проверяйте автомат отдельно — вызовом detect_intent() и route()
-на наборе фраз. Сквозной ответ появится на П4, память подключится на П5.
+НЕ МЕНЯТЬ: сигнатуру handle(session_id, text) -> str.
 """
 
 import logging
+import re
 
 import guardrails
 import memory
@@ -41,37 +37,43 @@ BLOCKED_REPLY = "Запрос отклонён слоем безопасност
 class Orchestrator:
     """Оркестратор ролей на конечном автомате."""
 
-    # --- Роли. Одна заполнена как образец, вторую добавляете вы (П3). ---
+    # --- Роли: у каждой своя зона ответственности ---
     ROLES: dict[str, dict] = {
         "analyst": {
             "description": "ищет факты в базе знаний и отвечает со ссылками на источники",
-            "temperature": 0.2,   # факты — низкая температура
-            "filters": {},        # {} = искать по всему индексу
+            "temperature": 0.2,
+            "filters": {},
         },
-        # TODO (П3): вторая роль. Например:
-        # "editor": {
-        #     "description": "переписывает ответ аналитика в нужном тоне и формате",
-        #     "temperature": 0.7,
-        #     "filters": {},
-        # },
+        "editor": {
+            "description": "переписывает ответ аналитика в нужном тоне и формате (официально, мягко, сухо)",
+            "temperature": 0.7,
+            "filters": {"category": "style_guide"},
+        },
+        "verifier": {
+            "description": "проверяет фактологическую точность ответа или запрашивает уточнение вопроса",
+            "temperature": 0.3,
+            "filters": {},
+        },
     }
 
     INITIAL_ROLE = "analyst"
     FALLBACK_ROLE = "analyst"
 
-    # --- Граф переходов: из какой роли в какие можно перейти (П3). ---
+    # --- Граф переходов конечного автомата ---
     TRANSITIONS: dict[str, set[str]] = {
-        "analyst": {"analyst"},
-        # TODO (П3): опишите переходы для своих ролей.
-        # Автомат нужен именно для того, чтобы не любой переход был разрешён:
-        # например, из "editor" нельзя уйти в "editor" — редактировать нечего,
-        # пока аналитик не нашёл факты.
+        "analyst": {"analyst", "editor"},
+        "editor": {"analyst", "verifier"},
+        "verifier": {"analyst", "verifier"},
     }
 
-    # --- Какой интент какой ролью обслуживается (П3). ---
+    # --- Соответствие интентов ролям ---
     INTENT_TO_ROLE: dict[str, str] = {
         "question": "analyst",
-        # TODO (П3): например "rewrite": "editor", "summarize": "editor"
+        "rewrite": "editor",
+        "summarize": "editor",
+        "verify": "verifier",
+        "clarify": "verifier",
+        "unknown": "analyst",
     }
 
     def __init__(self):
@@ -82,21 +84,114 @@ class Orchestrator:
         self._context: dict[str, list[Chunk]] = {}  # session_id -> что нашла прошлая роль
         self.usage: list[dict] = []           # расход токенов по вызовам, на нём считается TCO (П8)
 
-    # --- Ваша часть (П3) ---
+    # --- Реализация студента: определение интента ---
 
     def detect_intent(self, text: str) -> str:
         """Определить интент реплики. Возвращает ключ из INTENT_TO_ROLE.
 
-        Достаточно правил: ключевые слова, длина, наличие вопросительного знака.
-        LLM для маршрутизации не нужна — она недетерминирована и стоит денег,
-        а маршрут должен быть предсказуемым (Л3: FSM как детерминированная маршрутизация).
+        Используется простая эвристика на основе ключевых слов.
+        LLM не вызывается: маршрутизация остаётся предсказуемой.
 
-        На нераспознанной фразе верните "question" — пусть система отвечает,
-        а не отказывается.
+        На нераспознанной фразе возвращает "unknown",
+        который направляется в роль по умолчанию — "analyst".
         """
-        raise NotImplementedError("П3: реализуйте определение интента")
 
-    # --- Готовая механика: менять не нужно ---
+        text_lower = text.lower().strip()
+
+        if not text_lower:
+            return "unknown"
+
+        # 1. Проверка фактов и утверждений
+        verify_patterns = [
+            r"\bпроверить\b",
+            r"\bпроверь\b",
+            r"\bпроверьте\b",
+            r"\bправда ли\b",
+            r"\bверно ли\b",
+            r"\bневерно\b",
+            r"\bправильно ли\b",
+            r"\bкорректно ли\b",
+            r"\bподтверди\b",
+            r"\bверифицируй\b",
+        ]
+
+        if any(re.search(pattern, text_lower) for pattern in verify_patterns):
+            return "verify"
+
+        # 2. Уточнение вопроса
+        clarify_patterns = [
+            r"\bуточнить\b",
+            r"\bуточни\b",
+            r"\bуточните\b",
+            r"\bкак уточнить\b",
+            r"\bточнее\b",
+            r"\bподробнее\b",
+            r"\bразъясни\b",
+            r"\bразъясните\b",
+        ]
+
+        if any(re.search(pattern, text_lower) for pattern in clarify_patterns):
+            return "clarify"
+
+        # 3. Переписывание и переформулирование
+        rewrite_patterns = [
+            r"\bпереписать\b",
+            r"\bперепиши\b",
+            r"\bперепишите\b",
+            r"\bперефразировать\b",
+            r"\bперефразируй\b",
+            r"\bперефразируйте\b",
+            r"\bпереформулируй\b",
+            r"\bпереформулировать\b",
+            r"\bизложи иначе\b",
+            r"\bизмени стиль\b",
+        ]
+
+        if any(re.search(pattern, text_lower) for pattern in rewrite_patterns):
+            return "rewrite"
+
+        # 4. Суммирование и сокращение текста
+        summarize_patterns = [
+            r"\bперескажи\b",
+            r"\bперескажите\b",
+            r"\bрезюме\b",
+            r"\bкратко\b",
+            r"\bкраткое содержание\b",
+            r"\bкраткое изложение\b",
+            r"\bсуммируй\b",
+            r"\bсуммировать\b",
+            r"\bподведи итог\b",
+            r"\bподведите итог\b",
+            r"\bсократи текст\b",
+        ]
+
+        if any(re.search(pattern, text_lower) for pattern in summarize_patterns):
+            return "summarize"
+
+        # 5. Обычный вопрос
+        if "?" in text_lower:
+            return "question"
+
+        # Важно: проверяем наличие слова, а не просто непустой кортеж.
+        question_words = (
+            "что",
+            "как",
+            "почему",
+            "когда",
+            "где",
+            "кто",
+        )
+
+        if any(
+            re.search(rf"\b{word}\b", text_lower)
+            for word in question_words
+        ):
+            return "question"
+
+        # 6. Неизвестный интент
+        return "unknown"
+
+    # --- Готовая механика: не менять ---
 
     def route(self, session_id: str, intent: str) -> str:
         """Перевести автомат в новое состояние и вернуть активную роль."""

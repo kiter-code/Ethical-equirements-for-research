@@ -38,7 +38,7 @@ ingest.py — сбор исходных данных и наполнение в�
 
 import hashlib
 from pathlib import Path
-
+import re
 import config
 
 
@@ -71,7 +71,25 @@ def clean_text(text: str) -> str:
     Подсказка: начните с re.sub(r"-\n", "", text) и r"\s+" -> " ", посмотрите
     на результат глазами и добавьте правила под свои исходные данные.
     """
-    raise NotImplementedError("П2: реализуйте очистку текста")
+    """
+    Очистка текста от артефактов PDF/скачивания.
+    """
+    cleaned = text
+
+    # 1. Убираем переносы строк внутри слов (частая проблема при копировании PDF)
+    # Замена "-\n" или "- \n" в пробелы.
+    # Вариант А (если перенос именно с дефисом):
+    cleaned = re.sub(r'-\s*\n', ' ', cleaned)
+    # Вариант Б (если просто перенос):
+    cleaned = re.sub(r'\n', ' ', cleaned)
+    
+    # 2. Сжимаем множественные пробелы в один
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    
+    # 3. Удаляем лишние пробелы в начале и конце
+    cleaned = cleaned.strip()
+
+    return cleaned
 
 
 def chunk_text(text: str, size: int = config.CHUNK_SIZE,
@@ -80,24 +98,81 @@ def chunk_text(text: str, size: int = config.CHUNK_SIZE,
 
     Перекрытие нужно, чтобы мысль, попавшая на границу нарезки, не потерялась:
     её хвост окажется в начале следующего чанка.
-
-    Следите за двумя вещами: шаг сдвига равен size - overlap (не size), и
-    overlap обязан быть меньше size, иначе цикл не сойдётся.
     """
-    raise NotImplementedError("П2: реализуйте нарезку с перекрытием")
 
+
+    # Проверяем корректность параметров
+    if size <= 0:
+        raise ValueError("size должен быть больше 0")
+
+    if overlap < 0:
+        raise ValueError("overlap не может быть отрицательным")
+
+    if overlap >= size:
+        raise ValueError("overlap должен быть меньше size")
+
+    chunks = []
+    start = 0
+
+    # Пока не дошли до конца текста
+    while start < len(text):
+
+        # Конец текущего чанка
+        end = start + size
+
+        # Берём кусок текста
+        chunk = text[start:end]
+
+        # Добавляем его в список
+        chunks.append(chunk)
+
+        # Переходим к следующему чанку.
+        # Например: 512 - 64 = 448
+        start += size - overlap
+
+    return chunks
+
+RUBRICS = {
+    "scientific_ethics": [
+        "научная этика",
+        "этика научного работника",
+        "научный работник",
+        "учёный",
+        "исследователь",
+    ],
+    "publication_ethics": [
+        "публикационная этика",
+        "публикация",
+        "автор",
+        "соавтор",
+        "рецензирование",
+        "плагиат",
+    ],
+    "ethics_committee": [
+        "этический комитет",
+        "этическая экспертиза",
+        "этический комитет университета",
+        "этическое заключение",
+    ],
+}
+
+DEFAULT_CATEGORY = "general_ethics"
 
 def detect_category(text: str, source: str) -> str:
-    """Определить рубрику чанка.
+    """Определить рубрику чанка."""
 
-    Словарь рубрик — ваш проектный выбор, он зависит от домена. Для налогового
-    консультанта это может быть "law" | "faq" | "forms"; для ассистента абитуриента —
-    "admission" | "dormitory" | "schedule".
+    text_lower = text.lower()
 
-    Достаточно правил по имени файла и ключевым словам — LLM здесь не нужна.
-    Пустых категорий быть не должно: заведите рубрику по умолчанию.
-    """
-    raise NotImplementedError("П2: реализуйте рубрикацию")
+    # Проверяем рубрики по ключевым словам
+    for category, keywords in RUBRICS.items():
+
+        for keyword in keywords:
+
+            if keyword in text_lower:
+                return category
+
+    # Если ничего не нашли — используем категорию по умолчанию
+    return DEFAULT_CATEGORY
 
 
 # --- Сборка индекса: готова ---

@@ -71,25 +71,27 @@ def clean_text(text: str) -> str:
     Подсказка: начните с re.sub(r"-\n", "", text) и r"\s+" -> " ", посмотрите
     на результат глазами и добавьте правила под свои исходные данные.
     """
-    """
-    Очистка текста от артефактов PDF/скачивания.
-    """
-    cleaned = text
+    if not isinstance(text, str):
+        raise TypeError("text должен быть строкой")
 
-    # 1. Убираем переносы строк внутри слов (частая проблема при копировании PDF)
-    # Замена "-\n" или "- \n" в пробелы.
-    # Вариант А (если перенос именно с дефисом):
-    cleaned = re.sub(r'-\s*\n', ' ', cleaned)
-    # Вариант Б (если просто перенос):
-    cleaned = re.sub(r'\n', ' ', cleaned)
-    
-    # 2. Сжимаем множественные пробелы в один
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    
-    # 3. Удаляем лишние пробелы в начале и конце
-    cleaned = cleaned.strip()
+    # Неразрывные пробелы и мягкие переносы часто остаются после извлечения PDF.
+    cleaned = text.replace("\u00a0", " ").replace("\u00ad", "")
 
-    return cleaned
+    # Склеиваем только слова, разорванные дефисом на границе строки. Обычные
+    # дефисы внутри строки (например, "научно-исследовательский") сохраняются.
+    cleaned = re.sub(r"(?<=\w)[-‐‑]\s*\n\s*(?=\w)", "", cleaned)
+
+    # Удаляем отдельные номера страниц и подписи вида "стр. 12".
+    cleaned = re.sub(
+        r"(?im)^\s*(?:стр(?:аница)?\.?\s*)?\d+\s*(?:из\s*\d+)?\s*$",
+        " ",
+        cleaned,
+    )
+
+    # Нормализуем дефисы, переносы строк и последовательности пробелов.
+    cleaned = re.sub(r"(?<=\w)\s*[-‐‑]\s*(?=\w)", "-", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
 
 
 def chunk_text(text: str, size: int = config.CHUNK_SIZE,
@@ -101,77 +103,56 @@ def chunk_text(text: str, size: int = config.CHUNK_SIZE,
     """
 
 
-    # Проверяем корректность параметров
+    if not isinstance(text, str):
+        raise TypeError("text должен быть строкой")
     if size <= 0:
         raise ValueError("size должен быть больше 0")
-
     if overlap < 0:
         raise ValueError("overlap не может быть отрицательным")
-
     if overlap >= size:
         raise ValueError("overlap должен быть меньше size")
 
-    chunks = []
-    start = 0
-
-    # Пока не дошли до конца текста
-    while start < len(text):
-
-        # Конец текущего чанка
-        end = start + size
-
-        # Берём кусок текста
-        chunk = text[start:end]
-
-        # Добавляем его в список
-        chunks.append(chunk)
-
-        # Переходим к следующему чанку.
-        # Например: 512 - 64 = 448
-        start += size - overlap
-
-    return chunks
+    step = size - overlap
+    return [text[start:start + size] for start in range(0, len(text), step)]
 
 RUBRICS = {
-    "scientific_ethics": [
-        "научная этика",
-        "этика научного работника",
-        "научный работник",
-        "учёный",
-        "исследователь",
-    ],
     "publication_ethics": [
-        "публикационная этика",
-        "публикация",
-        "автор",
-        "соавтор",
-        "рецензирование",
-        "плагиат",
+        "публикац", "автор", "соавтор", "реценз", "плагиат",
     ],
     "ethics_committee": [
-        "этический комитет",
-        "этическая экспертиза",
-        "этический комитет университета",
-        "этическое заключение",
+        "этическ комитет", "этическ экспертиз", "этическ заключен",
+        "информированн согласи", "участием людей", "участием животных",
+    ],
+    "scientific_ethics": [
+        "научн этик", "научн работник", "учён", "исследовател",
+        "фальсификац", "добросовестн",
     ],
 }
 
 DEFAULT_CATEGORY = "general_ethics"
 
+SOURCE_CATEGORIES = {
+    "полож_об_эт_комитете": "ethics_committee",
+    "kodeks-etiki": "scientific_ethics",
+}
+
 def detect_category(text: str, source: str) -> str:
     """Определить рубрику чанка."""
 
-    text_lower = text.lower()
+    haystack = text.casefold().replace("ё", "е")
+    scores = {
+        category: sum(haystack.count(keyword.replace("ё", "е")) for keyword in keywords)
+        for category, keywords in RUBRICS.items()
+    }
+    best_category = max(scores, key=scores.get)
+    if scores[best_category] > 0:
+        return best_category
 
-    # Проверяем рубрики по ключевым словам
-    for category, keywords in RUBRICS.items():
+    source_lower = source.casefold().replace("ё", "е")
+    for source_part, category in SOURCE_CATEGORIES.items():
+        if source_part in source_lower:
+            return category
 
-        for keyword in keywords:
-
-            if keyword in text_lower:
-                return category
-
-    # Если ничего не нашли — используем категорию по умолчанию
     return DEFAULT_CATEGORY
 
 

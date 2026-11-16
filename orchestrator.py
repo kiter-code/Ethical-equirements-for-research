@@ -40,18 +40,30 @@ class Orchestrator:
     # --- Роли: у каждой своя зона ответственности ---
     ROLES: dict[str, dict] = {
         "analyst": {
-            "description": "ищет факты в базе знаний и отвечает со ссылками на источники",
+            "description": (
+                "Ищет применимые нормы в базе знаний и отвечает со ссылками на источники; "
+                "не подтверждает спорные утверждения без отдельной проверки. "
+                "Меняет исход, когда найденная норма позволяет дать доказательный ответ."
+            ),
             "temperature": 0.2,
             "filters": {},
         },
-        "editor": {
-            "description": "переписывает ответ аналитика в нужном тоне и формате (официально, мягко, сухо)",
-            "temperature": 0.7,
-            "filters": {"category": "style_guide"},
-        },
         "verifier": {
-            "description": "проверяет фактологическую точность ответа или запрашивает уточнение вопроса",
-            "temperature": 0.3,
+            "description": (
+                "Сверяет утверждение с найденными фрагментами и отказывает в подтверждении, "
+                "если доказательств недостаточно; не формулирует новый ответ вместо аналитика. "
+                "Меняет исход, подтверждая либо опровергая спорное утверждение."
+            ),
+            "temperature": 0.1,
+            "filters": {},
+        },
+        "clarifier": {
+            "description": (
+                "Выявляет недостающие условия и задаёт один уточняющий вопрос; "
+                "не делает окончательных выводов и не подменяет аналитика. "
+                "Меняет исход, останавливая преждевременный ответ до получения условий."
+            ),
+            "temperature": 0.2,
             "filters": {},
         },
     }
@@ -61,19 +73,18 @@ class Orchestrator:
 
     # --- Граф переходов конечного автомата ---
     TRANSITIONS: dict[str, set[str]] = {
-        "analyst": {"analyst", "editor"},
-        "editor": {"analyst", "verifier"},
-        "verifier": {"analyst", "verifier"},
+        "analyst": {"analyst", "verifier", "clarifier"},
+        "verifier": {"analyst", "verifier", "clarifier"},
+        # Повторное уточнение без нового ответа запрещено: сначала управление
+        # должно вернуться аналитику или верификатору.
+        "clarifier": {"analyst", "verifier"},
     }
 
     # --- Соответствие интентов ролям ---
     INTENT_TO_ROLE: dict[str, str] = {
         "question": "analyst",
-        "rewrite": "editor",
-        "summarize": "editor",
         "verify": "verifier",
-        "clarify": "verifier",
-        "unknown": "analyst",
+        "clarify": "clarifier",
     }
 
     def __init__(self):
@@ -92,25 +103,26 @@ class Orchestrator:
         Используется простая эвристика на основе ключевых слов.
         LLM не вызывается: маршрутизация остаётся предсказуемой.
 
-        На нераспознанной фразе возвращает "unknown",
-        который направляется в роль по умолчанию — "analyst".
+        Интент по умолчанию — "question", он направляется к аналитику.
         """
 
         text_lower = text.lower().strip()
-
-        if not text_lower:
-            return "unknown"
 
         # 1. Проверка фактов и утверждений
         verify_patterns = [
             r"\bпроверить\b",
             r"\bпроверь\b",
             r"\bпроверьте\b",
+            r"\bперепроверь\b",
+            r"\bперепроверьте\b",
             r"\bправда ли\b",
+            r"\bдействительно правда\b",
             r"\bверно ли\b",
             r"\bневерно\b",
             r"\bправильно ли\b",
             r"\bкорректно ли\b",
+            r"\bты уверен\b",
+            r"\bвы уверены\b",
             r"\bподтверди\b",
             r"\bверифицируй\b",
         ]
@@ -133,42 +145,7 @@ class Orchestrator:
         if any(re.search(pattern, text_lower) for pattern in clarify_patterns):
             return "clarify"
 
-        # 3. Переписывание и переформулирование
-        rewrite_patterns = [
-            r"\bпереписать\b",
-            r"\bперепиши\b",
-            r"\bперепишите\b",
-            r"\bперефразировать\b",
-            r"\bперефразируй\b",
-            r"\bперефразируйте\b",
-            r"\bпереформулируй\b",
-            r"\bпереформулировать\b",
-            r"\bизложи иначе\b",
-            r"\bизмени стиль\b",
-        ]
-
-        if any(re.search(pattern, text_lower) for pattern in rewrite_patterns):
-            return "rewrite"
-
-        # 4. Суммирование и сокращение текста
-        summarize_patterns = [
-            r"\bперескажи\b",
-            r"\bперескажите\b",
-            r"\bрезюме\b",
-            r"\bкратко\b",
-            r"\bкраткое содержание\b",
-            r"\bкраткое изложение\b",
-            r"\bсуммируй\b",
-            r"\bсуммировать\b",
-            r"\bподведи итог\b",
-            r"\bподведите итог\b",
-            r"\bсократи текст\b",
-        ]
-
-        if any(re.search(pattern, text_lower) for pattern in summarize_patterns):
-            return "summarize"
-
-        # 5. Обычный вопрос
+        # 3. Обычный вопрос
         if "?" in text_lower:
             return "question"
 
@@ -188,8 +165,8 @@ class Orchestrator:
         ):
             return "question"
 
-        # 6. Неизвестный интент
-        return "unknown"
+        # Нераспознанная или пустая реплика получает определённый интент по умолчанию.
+        return "question"
 
     # --- Готовая механика: не менять ---
 

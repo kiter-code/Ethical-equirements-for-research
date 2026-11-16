@@ -35,7 +35,7 @@ TOP_K = 5             # сколько чанков возвращает пои�
 MEMORY_WINDOW = 10    # сколько последних сообщений уходит в контекст LLM
 
 # --- LLM ---
-LLM_BACKEND = os.getenv("LLM_BACKEND", "gigachat")
+LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama")
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS", "")
 GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat")
 GIGACHAT_VERIFY_SSL = os.getenv("GIGACHAT_VERIFY_SSL", "false").lower() == "true"

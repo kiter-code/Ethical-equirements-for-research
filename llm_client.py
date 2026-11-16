@@ -26,6 +26,11 @@ llm_client.py — доступ к языковой модели за общим 
 работа, сданная на LLM_BACKEND=fake, не принимается.
 """
 
+import math
+import re
+
+import requests
+
 import config
 from contracts import LLMClient
 
@@ -74,11 +79,32 @@ class OllamaClient:
         У reasoning-моделей ответ приходит с блоком <think>...</think> — решите,
         показывать его пользователю или вырезать, и обоснуйте выбор на защите.
         """
-        raise NotImplementedError("П4: реализуйте вызов Ollama")
+        try:
+            response = requests.post(
+                f"{self.host.rstrip('/')}/api/chat",
+                json={"model": self.model, "messages": messages, "stream": False,
+                      "options": {"temperature": temperature}},
+                timeout=180,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError("поле message.content не является строкой")
+            # Рассуждения не показываем: отдельное thinking игнорируется,
+            # а встроенные теги удаляются из пользовательского ответа.
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content or "Ошибка Ollama: модель вернула пустой ответ."
+        except requests.Timeout:
+            return "Ошибка Ollama: превышено время ожидания ответа."
+        except requests.RequestException as exc:
+            return f"Ошибка Ollama: сервис недоступен или вернул ошибку ({exc})."
+        except (ValueError, KeyError, TypeError):
+            return "Ошибка Ollama: некорректный формат ответа."
 
     def count_tokens(self, text: str) -> int:
         """Оценка длины в токенах — та же логика, что и в GigaChatClient."""
-        raise NotImplementedError("П4: реализуйте подсчёт токенов")
+        return math.ceil(len(text) / 3)
 
 
 def build_client() -> LLMClient:

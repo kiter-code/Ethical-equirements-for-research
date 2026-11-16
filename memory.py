@@ -17,13 +17,12 @@ memory.py — сессионная память на SQLite.
 НЕ МЕНЯТЬ: сигнатуры save() и window(). На них завязаны orchestrator.py,
 mcp_server.py и test_suite.py.
 
-Почему заглушки здесь не падают, а молчат. Ядро вызывает память начиная с П3,
-а пишете вы её на П5. Поэтому до реализации save() ничего не делает, а window()
-возвращает пустой список: система работает без памяти, просто забывчивая.
-Как только вы уберёте заглушки, память включится сама.
+История сохраняется между запусками; окно ограничивает число сообщений,
+отправляемых модели, не удаляя более старые записи из базы.
 """
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 
 import config
@@ -51,8 +50,9 @@ def create_schema() -> None:
 
     Подсказка: SCHEMA выше уже написана — выполните её и не забудьте commit().
     """
-    # TODO (П5): выполнить SCHEMA
-    return None
+    with closing(connect()) as conn:
+        with conn:
+            conn.execute(SCHEMA)
 
 
 def save(session_id: str, role: str, content: str) -> None:
@@ -62,8 +62,12 @@ def save(session_id: str, role: str, content: str) -> None:
     Пользуйтесь параметрами запроса (?, ?, ?), а не конкатенацией строк —
     иначе получите SQL-инъекцию в дополнение к prompt-инъекции из П7.
     """
-    # TODO (П5): вставить реплику в messages
-    return None
+    with closing(connect()) as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, role, content, datetime.now().isoformat(timespec="seconds")),
+            )
 
 
 def window(session_id: str, n: int = config.MEMORY_WINDOW) -> list[Message]:
@@ -72,11 +76,20 @@ def window(session_id: str, n: int = config.MEMORY_WINDOW) -> list[Message]:
     Ловушка: ORDER BY id DESC LIMIT n даёт последние n, но в обратном порядке.
     Разверните результат перед возвратом, иначе LLM прочитает диалог задом наперёд.
     """
-    # TODO (П5): выбрать последние n сообщений сессии
-    return []
+    if n <= 0:
+        return []
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            "SELECT role, content, timestamp FROM messages "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, n),
+        ).fetchall()
+    return [Message(role=role, content=content, timestamp=timestamp)
+            for role, content, timestamp in reversed(rows)]
 
 
 def clear(session_id: str) -> None:
     """Удалить историю сессии. Нужна кнопке очистки в app.py (П6)."""
-    # TODO (П5): удалить реплики сессии
-    return None
+    with closing(connect()) as conn:
+        with conn:
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
